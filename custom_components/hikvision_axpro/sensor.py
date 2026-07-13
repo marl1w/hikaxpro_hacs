@@ -9,7 +9,6 @@ import logging
 from typing import cast
 
 from homeassistant.components.sensor import (
-    DOMAIN as SENSOR_DOMAIN,
     SensorDeviceClass,
     SensorEntity,
     SensorStateClass,
@@ -126,15 +125,12 @@ class HikTemperature(CoordinatorEntity, HikDevice, SensorEntity):
         super().__init__(coordinator)
         self.zone = zone
         self._ref_id = entry_id
-        self._attr_unique_id = f"{self.coordinator.device_name}-temp-{zone.id}"
+        self._attr_unique_id = f"{self.coordinator.mac}-temp-{zone.id}"
         self._attr_icon = "mdi:thermometer"
         # self._attr_name = f"{self.zone.name} Temperature"
         self._device_class = SensorDeviceClass.TEMPERATURE
         self._attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
         self._attr_has_entity_name = True
-        self.entity_id = (
-            f"{SENSOR_DOMAIN}.{coordinator.device_name}-temperature-{zone.id}"
-        )
         self._attr_state_class = SensorStateClass.MEASUREMENT
 
     @property
@@ -167,14 +163,13 @@ class HikHumidity(CoordinatorEntity, HikDevice, SensorEntity):
         super().__init__(coordinator)
         self.zone = zone
         self._ref_id = entry_id
-        self._attr_unique_id = f"{self.coordinator.device_name}-humid-{zone.id}"
+        self._attr_unique_id = f"{self.coordinator.mac}-humid-{zone.id}"
         self._attr_icon = "mdi:cloud-percent"
         # self._attr_name = f"{self.zone.name} Humidity"
         self._device_class = SensorDeviceClass.HUMIDITY
         self._attr_native_unit_of_measurement = PERCENTAGE
         self._attr_state_class = SensorStateClass.MEASUREMENT
         self._attr_has_entity_name = True
-        self.entity_id = f"{SENSOR_DOMAIN}.{coordinator.device_name}-humidity-{zone.id}"
 
     @property
     def name(self) -> str | None:
@@ -206,14 +201,13 @@ class HikBatteryInfo(CoordinatorEntity, HikDevice, SensorEntity):
         super().__init__(coordinator)
         self.zone = zone
         self._ref_id = entry_id
-        self._attr_unique_id = f"{self.coordinator.device_name}-battery-{zone.id}"
+        self._attr_unique_id = f"{self.coordinator.mac}-battery-{zone.id}"
         self._attr_icon = "mdi:battery"
         self._attr_native_unit_of_measurement = PERCENTAGE
         self._attr_entity_category = EntityCategory.DIAGNOSTIC
         self._attr_state_class = SensorStateClass.MEASUREMENT
         self._attr_device_class = SensorDeviceClass.BATTERY
         self._attr_has_entity_name = True
-        self.entity_id = f"{SENSOR_DOMAIN}.{coordinator.device_name}-battery-{zone.id}"
 
     @property
     def name(self) -> str | None:
@@ -245,14 +239,13 @@ class HikSignalInfo(CoordinatorEntity, HikDevice, SensorEntity):
         super().__init__(coordinator)
         self.zone = zone
         self._ref_id = entry_id
-        self._attr_unique_id = f"{self.coordinator.device_name}-signal-{zone.id}"
+        self._attr_unique_id = f"{self.coordinator.mac}-signal-{zone.id}"
         self._attr_icon = "mdi:signal"
         self._device_class = SensorDeviceClass.SIGNAL_STRENGTH
         self._attr_native_unit_of_measurement = SIGNAL_STRENGTH_DECIBELS_MILLIWATT
         self._attr_entity_category = EntityCategory.DIAGNOSTIC
         self._attr_state_class = SensorStateClass.MEASUREMENT
         self._attr_has_entity_name = True
-        self.entity_id = f"{SENSOR_DOMAIN}.{coordinator.device_name}-signal-{zone.id}"
 
     @property
     def name(self) -> str | None:
@@ -284,9 +277,8 @@ class HikStatusInfo(CoordinatorEntity, HikDevice, SensorEntity):
         super().__init__(coordinator)
         self.zone = zone
         self._ref_id = entry_id
-        self._attr_unique_id = f"{self.coordinator.device_name}-status-{zone.id}"
+        self._attr_unique_id = f"{self.coordinator.mac}-status-{zone.id}"
         self._attr_has_entity_name = True
-        self.entity_id = f"{SENSOR_DOMAIN}.{coordinator.device_name}-status-{zone.id}"
         if (
             self.coordinator.zones
             and self.coordinator.zones[self.zone.id]

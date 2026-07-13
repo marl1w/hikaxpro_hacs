@@ -2,4 +2,5 @@ hikaxpro==2.3.0
 homeassistant
 xmltodict
 pytest
-
+pytest-homeassistant-custom-component
+freezegun

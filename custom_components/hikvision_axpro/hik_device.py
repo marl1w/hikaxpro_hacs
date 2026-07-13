@@ -17,6 +17,8 @@ class HikDevice:
 
     zone: Zone
     _ref_id: str
+    # Provided by the concrete entity class (Entity.name).
+    name: str | None
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -29,3 +31,4 @@ class HikDevice:
             # model="Unknown" if self.zone.model is not "0x00001" else self.zone.model,
             sw_version=self.zone.version,
         )
+

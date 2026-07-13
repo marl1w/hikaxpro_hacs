@@ -20,10 +20,34 @@ from homeassistant.const import (
     CONF_SCAN_INTERVAL,
 )
 from homeassistant.components.alarm_control_panel import SCAN_INTERVAL
+from homeassistant.helpers.selector import (
+    SelectSelector,
+    SelectSelectorConfig,
+    SelectSelectorMode,
+)
 
-from .const import DOMAIN, USE_CODE_ARMING, ALLOW_SUBSYSTEMS, ENABLE_DEBUG_OUTPUT
+from .const import (
+    DOMAIN,
+    USE_CODE_ARMING,
+    ALLOW_SUBSYSTEMS,
+    ENABLE_DEBUG_OUTPUT,
+    ARM_MODES,
+    CONF_AUTO_BYPASS_MODES,
+    CONF_BYPASS_REENABLE_DEBOUNCE,
+    CONF_CLEAR_ALL_ON_DISARM,
+    DEFAULT_BYPASS_REENABLE_DEBOUNCE,
+)
 
 _LOGGER = logging.getLogger(__name__)
+
+AUTO_BYPASS_MODES_SELECTOR = SelectSelector(
+    SelectSelectorConfig(
+        options=ARM_MODES,
+        multiple=True,
+        mode=SelectSelectorMode.LIST,
+        translation_key="auto_bypass_modes",
+    )
+)
 
 STEP_USER_DATA_SCHEMA = vol.Schema(
     {
@@ -36,6 +60,11 @@ STEP_USER_DATA_SCHEMA = vol.Schema(
         vol.Optional(USE_CODE_ARMING, default=False): bool,
         vol.Required(CONF_SCAN_INTERVAL, default=SCAN_INTERVAL.total_seconds()): int,
         vol.Optional(ALLOW_SUBSYSTEMS, default=False): bool,
+        vol.Optional(CONF_AUTO_BYPASS_MODES, default=[]): AUTO_BYPASS_MODES_SELECTOR,
+        vol.Optional(
+            CONF_BYPASS_REENABLE_DEBOUNCE, default=DEFAULT_BYPASS_REENABLE_DEBOUNCE
+        ): vol.All(int, vol.Range(min=0, max=300)),
+        vol.Optional(CONF_CLEAR_ALL_ON_DISARM, default=False): bool,
     }
 )
 
@@ -51,6 +80,11 @@ CONFIGURE_SCHEMA = vol.Schema(
         vol.Optional(USE_CODE_ARMING, default=False): bool,
         vol.Required(CONF_SCAN_INTERVAL, default=SCAN_INTERVAL.total_seconds()): int,
         vol.Optional(ALLOW_SUBSYSTEMS, default=False): bool,
+        vol.Optional(CONF_AUTO_BYPASS_MODES, default=[]): AUTO_BYPASS_MODES_SELECTOR,
+        vol.Optional(
+            CONF_BYPASS_REENABLE_DEBOUNCE, default=DEFAULT_BYPASS_REENABLE_DEBOUNCE
+        ): vol.All(int, vol.Range(min=0, max=300)),
+        vol.Optional(CONF_CLEAR_ALL_ON_DISARM, default=False): bool,
         vol.Optional(ENABLE_DEBUG_OUTPUT, default=False): bool,
     }
 )

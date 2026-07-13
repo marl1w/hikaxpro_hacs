@@ -3,7 +3,7 @@
 import asyncio
 from asyncio import timeout
 import contextlib
-from datetime import timedelta
+from datetime import datetime, timedelta
 import logging
 
 import hikaxpro
@@ -28,19 +28,29 @@ from homeassistant.const import (
     Platform,
 )
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import ConfigEntryNotReady
+from homeassistant.exceptions import ConfigEntryNotReady, HomeAssistantError
 import homeassistant.helpers.device_registry as dr
 import homeassistant.helpers.entity_registry as er
+from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.service import async_register_admin_service
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.util import dt as dt_util
 
+from .bypass_manager import BypassManager
+from .bypass_store import BypassStore
 from .const import (
     ALLOW_SUBSYSTEMS,
+    ARM_MODE_AWAY,
+    ARM_MODE_HOME,
+    ARM_MODE_VACATION,
+    DATA_BYPASS_MANAGER,
     DATA_COORDINATOR,
     DOMAIN,
     ENABLE_DEBUG_OUTPUT,
+    ISSUE_BYPASS_UNSUPPORTED,
     USE_CODE_ARMING,
 )
+from .isapi_bypass import AxProBypassClient
 from .model import (
     Arming,
     ExDevStatusResponse,
@@ -64,6 +74,10 @@ PLATFORMS: list[Platform] = [
     Platform.SWITCH,
 ]
 _LOGGER = logging.getLogger(__name__)
+
+# The zone configuration (names, types, panel-side bypass restrictions)
+# changes rarely; refresh it hourly instead of on every poll.
+ZONE_CONFIG_REFRESH_INTERVAL = timedelta(hours=1)
 
 
 def _filter_enabled(n: SubSys) -> bool:
@@ -182,8 +196,42 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             await hass.async_add_executor_job(coordinator.init_device)
     except (TimeoutError, ConnectionError) as ex:
         raise ConfigEntryNotReady from ex
+
+    bypass_client = AxProBypassClient(axpro)
+    bypass_store = BypassStore(hass, entry.entry_id)
+    await bypass_store.async_load()
+    bypass_manager = BypassManager(hass, entry, coordinator, bypass_client, bypass_store)
+    # A firmware that reports the per-zone bypass state supports the
+    # bypass control endpoint; detected from already-fetched data.
+    bypass_supported = any(
+        zone.bypassed is not None for zone in (coordinator.zones or {}).values()
+    )
+    bypass_manager.bypass_supported = bypass_supported
+    coordinator.bypass_manager = bypass_manager
+    bypass_manager.async_sync_bypassable_flags()
+    if not bypass_supported:
+        _LOGGER.warning(
+            "Panel %s does not report zone bypass states; "
+            "bypass features are disabled",
+            coordinator.device_name,
+        )
+        ir.async_create_issue(
+            hass,
+            DOMAIN,
+            f"{ISSUE_BYPASS_UNSUPPORTED}_{entry.entry_id}",
+            is_fixable=False,
+            severity=ir.IssueSeverity.WARNING,
+            translation_key=ISSUE_BYPASS_UNSUPPORTED,
+            translation_placeholders={"device": coordinator.device_name or ""},
+        )
+
     hass.data.setdefault(DOMAIN, {})
-    hass.data[DOMAIN][entry.entry_id] = {DATA_COORDINATOR: coordinator}
+    hass.data[DOMAIN][entry.entry_id] = {
+        DATA_COORDINATOR: coordinator,
+        DATA_BYPASS_MANAGER: bypass_manager,
+    }
+
+    entry.async_on_unload(entry.add_update_listener(update_listener))
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
@@ -193,7 +241,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
     if unload_ok := await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
-        hass.data[DOMAIN].pop(entry.entry_id)
+        data = hass.data[DOMAIN].pop(entry.entry_id)
+        manager: BypassManager | None = data.get(DATA_BYPASS_MANAGER)
+        if manager is not None:
+            manager.async_unload()
 
     return unload_ok
 
@@ -207,6 +258,7 @@ class HikAxProDataUpdateCoordinator(DataUpdateCoordinator):
     """Class to manage fetching ax pro data."""
 
     axpro: hikaxpro.HikAxPro
+    bypass_manager: BypassManager | None = None
     zone_status: ZonesResponse | None
     zones: dict[int, Zone] | None = None
     device_info: dict | None = None
@@ -242,6 +294,7 @@ class HikAxProDataUpdateCoordinator(DataUpdateCoordinator):
         self.use_code_arming = use_code_arming
         self.code = code
         self.use_sub_systems = use_sub_systems
+        self._last_zone_config_fetch: datetime | None = None
         super().__init__(
             hass,
             _LOGGER,
@@ -318,6 +371,7 @@ class HikAxProDataUpdateCoordinator(DataUpdateCoordinator):
     def load_devices(self):
         """Load devices from Zone Config."""
         devices = self._load_devices()
+        self._last_zone_config_fetch = dt_util.utcnow()
         if devices is not None:
             self.devices = {}
             for item in devices.list:
@@ -401,6 +455,23 @@ class HikAxProDataUpdateCoordinator(DataUpdateCoordinator):
             zones[zone.zone.id] = zone.zone
         self.zones = zones
         _LOGGER.debug("Zones: %s", zone_response)
+        # Refresh the zone configuration hourly, so panel-side setting
+        # changes (e.g. "forbid bypass on arming") are picked up without
+        # a reload while keeping the poll cycle light. A failed refresh
+        # keeps the previous configuration and is retried next poll.
+        if (
+            self._last_zone_config_fetch is None
+            or dt_util.utcnow() - self._last_zone_config_fetch
+            >= ZONE_CONFIG_REFRESH_INTERVAL
+        ):
+            try:
+                self.load_devices()
+            except Exception as err:  # noqa: BLE001 - keep polling alive
+                _LOGGER.warning(
+                    "Zone configuration refresh failed; keeping the previous "
+                    "one: %s",
+                    err,
+                )
         # relays
         devices_status = self._load_ext_devices_status()
         relays_status = {}
@@ -417,30 +488,76 @@ class HikAxProDataUpdateCoordinator(DataUpdateCoordinator):
                 await self.hass.async_add_executor_job(self._update_data)
         except ConnectionError as error:
             raise UpdateFailed(error) from error
+        if self.bypass_manager is not None:
+            await self.bypass_manager.async_on_data_refreshed()
+
+    async def _async_arm(self, arm_command, sub_id: int | None, mode: str) -> None:
+        """Run the pre-arm bypass flow, then send the arm command."""
+        manager = self.bypass_manager
+        if manager is not None and manager.arm_lock.locked():
+            raise HomeAssistantError(
+                "Another arming or bypass operation is already in progress",
+                translation_domain=DOMAIN,
+                translation_key="arming_in_progress",
+            )
+        if manager is not None:
+            async with manager.arm_lock:
+                await manager.async_prepare_arming(sub_id, mode)
+                is_success = await self.hass.async_add_executor_job(
+                    arm_command, sub_id
+                )
+        else:
+            is_success = await self.hass.async_add_executor_job(arm_command, sub_id)
+
+        if not is_success:
+            raise HomeAssistantError(
+                "The panel refused the arm command",
+                translation_domain=DOMAIN,
+                translation_key="arm_refused",
+            )
+        await self._async_update_data()
+        await self.async_request_refresh()
+
+    def _arm_vacation(self, sub_id: int | None):
+        """Send the vacation arm command (not exposed by hikaxpro)."""
+        sid = "0xffffffff" if sub_id is None else str(sub_id)
+        endpoint = self.axpro.build_url(
+            f"http://{self.host}/ISAPI/SecurityCP/control/arm/{sid}?ways=vacation",
+            True,
+        )
+        response = self.axpro.make_request(endpoint, "PUT", None, True)
+        if response.status_code != 200:
+            raise hikaxpro.errors.UnexpectedResponseCodeError(
+                response.status_code, response.text
+            )
+        return response.json()
 
     async def async_arm_home(self, sub_id: int | None = None):
         """Arm alarm panel in home state."""
-        is_success = await self.hass.async_add_executor_job(self.axpro.arm_home, sub_id)
-
-        if is_success:
-            await self._async_update_data()
-            await self.async_request_refresh()
+        await self._async_arm(self.axpro.arm_home, sub_id, ARM_MODE_HOME)
 
     async def async_arm_away(self, sub_id: int | None = None):
         """Arm alarm panel in away state."""
-        is_success = await self.hass.async_add_executor_job(self.axpro.arm_away, sub_id)
+        await self._async_arm(self.axpro.arm_away, sub_id, ARM_MODE_AWAY)
 
-        if is_success:
-            await self._async_update_data()
-            await self.async_request_refresh()
+    async def async_arm_vacation(self, sub_id: int | None = None):
+        """Arm alarm panel in vacation state."""
+        await self._async_arm(self._arm_vacation, sub_id, ARM_MODE_VACATION)
 
     async def async_disarm(self, sub_id: int | None = None):
         """Disarm alarm control panel."""
         is_success = await self.hass.async_add_executor_job(self.axpro.disarm, sub_id)
 
-        if is_success:
-            await self._async_update_data()
-            await self.async_request_refresh()
+        if not is_success:
+            raise HomeAssistantError(
+                "The panel refused the disarm command",
+                translation_domain=DOMAIN,
+                translation_key="disarm_refused",
+            )
+        if self.bypass_manager is not None:
+            await self.bypass_manager.async_on_disarm(sub_id)
+        await self._async_update_data()
+        await self.async_request_refresh()
 
     def _relay_call(self, relay_id: int, is_enabled: bool) -> JSONResponseStatus:
         endpoint = self.axpro.build_url(

@@ -1,5 +1,20 @@
 # Changelog
 
+## v3.2.0
+Zone bypass management (fork feature):
+- **feat**: services `bypass_zone`, `unbypass_zone`, `clear_all_bypasses` with outcome verification against the panel
+- **feat**: per-zone "Bypassable on arming" config switch (persistent, default off; only for Instant zones, mirroring which zones the panel offers "forbid bypass on arming" for); when that panel-side setting (`armNoBypassEnabled`) is enabled the switch is forced off and not editable
+- **feat**: opt-in auto-bypass on arming, selectable per arming mode (home / away / vacation, multi-select in the options), with strict abort semantics, rollback on partial failure and ownership tracking (survives restarts)
+- **feat**: automatic bypass re-enable once the zone recovers (configurable debounce, INFO/WARNING logging of every step), cleanup on disarm (any source), reconciliation with panel state
+- **feat**: "Ready to arm" binary sensor per arming mode (home/away/vacation, always created) with blocking/bypassable zone attributes and per-area breakdown; home-mode evaluation skips zones the panel stay-bypasses itself
+- **feat**: vacation arming support (`alarm_arm_vacation`) on the main and area panels
+- **feat**: events `hikvision_axpro_bypass_applied`, `hikvision_axpro_bypass_removed`, `hikvision_axpro_arming_blocked`
+- **feat**: bypass diagnostic attributes on alarm panels and bypass sensors
+- **fix**: entity ID generation no longer duplicates words shared by the device/zone name and the entity name (e.g. `villa_1_alarm` instead of `living_alarm_alarm`); the entity-ID migration also collapses duplicated multi-word runs in existing IDs (`villa_1_villa_1_alarm_panel` -> `villa_1_alarm_panel`) and notifies about renames
+- **fix**: a refused arm/disarm command now raises a visible error instead of being silently ignored
+- **fix**: options changes are applied on save (update listener was never registered)
+- **chore**: unit test suite with a mocked panel; graceful degradation on firmware without bypass support (repair issue)
+
 ## v3.1.0
 - **feat**: HA 2025.12 compliance #162
 
