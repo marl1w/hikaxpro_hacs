@@ -174,7 +174,7 @@ async def test_arm_home_also_runs_the_flow(hass, panel):
     panel.set_zone(1, magnetOpenStatus=True)
     entry = await setup_entry(hass)
     manager = get_manager(hass, entry)
-    await manager.async_set_bypassable(1, True)
+    await manager.async_set_bypassable(1, True, "home")
 
     await hass.services.async_call(
         PANEL_ENTITY,
@@ -193,7 +193,7 @@ async def test_arm_vacation_runs_the_flow(hass, panel):
     panel.set_zone(1, magnetOpenStatus=True)
     entry = await setup_entry(hass)
     manager = get_manager(hass, entry)
-    await manager.async_set_bypassable(1, True)
+    await manager.async_set_bypassable(1, True, "vacation")
 
     await hass.services.async_call(
         PANEL_ENTITY,

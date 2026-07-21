@@ -220,6 +220,18 @@ class BypassManager:
         modes = self.entry.data.get(CONF_AUTO_BYPASS_MODES) or []
         return {mode for mode in modes if mode in ARM_MODES}
 
+    def _mode_bypassable_set(self, mode: str) -> set[int]:
+        """Stored bypassable flags for one mode (no option gating)."""
+        if mode not in ARM_MODES:
+            mode = ARM_MODE_AWAY
+        return self.store.data.bypassable_zones_by_mode.setdefault(mode, set())
+
+    def bypassable_zone_ids(self, mode: str) -> set[int]:
+        """Effective bypassable zone ids for one arming mode."""
+        if mode not in self.auto_bypass_modes:
+            return set()
+        return set(self._mode_bypassable_set(mode))
+
     @property
     def debounce_seconds(self) -> int:
         """How long a zone must stay healthy before re-enable."""
@@ -234,9 +246,9 @@ class BypassManager:
         """Whether disarm cleanup extends to all bypasses."""
         return bool(self.entry.data.get(CONF_CLEAR_ALL_ON_DISARM, False))
 
-    def is_bypassable(self, zone_id: int) -> bool:
-        """Whether the zone is marked bypassable on arming."""
-        return zone_id in self.store.data.bypassable_zones
+    def is_bypassable(self, zone_id: int, mode: str = ARM_MODE_AWAY) -> bool:
+        """Whether the zone is marked bypassable for one arming mode."""
+        return zone_id in self._mode_bypassable_set(mode)
 
     def zone_forbids_bypass(self, zone_id: int) -> bool:
         """Whether the panel config forbids bypassing this zone on arming.
@@ -259,25 +271,35 @@ class BypassManager:
         reload).
         """
         zones = self.coordinator.zones or {}
-        dropped = set()
-        for zone_id in self.store.data.bypassable_zones:
-            zone = zones.get(zone_id)
-            if self.zone_forbids_bypass(zone_id) or (
-                zone is not None and not is_auto_bypass_eligible(zone)
-            ):
-                dropped.add(zone_id)
-        if not dropped:
+        dropped_by_mode: dict[str, set[int]] = {}
+        for mode in ARM_MODES:
+            dropped = set()
+            for zone_id in self._mode_bypassable_set(mode):
+                zone = zones.get(zone_id)
+                if self.zone_forbids_bypass(zone_id) or (
+                    zone is not None and not is_auto_bypass_eligible(zone)
+                ):
+                    dropped.add(zone_id)
+            if dropped:
+                dropped_by_mode[mode] = dropped
+        if not dropped_by_mode:
             return
-        _LOGGER.info(
-            "Zones %s may not be bypassed on arming (panel config or "
-            "zone type); clearing their bypassable flag",
-            sorted(dropped),
-        )
-        self.store.data.bypassable_zones -= dropped
+        for mode, dropped in dropped_by_mode.items():
+            _LOGGER.info(
+                "Zones %s may not be bypassed on %s arming (panel config "
+                "or zone type); clearing their bypassable flag",
+                sorted(dropped),
+                mode,
+            )
+            self._mode_bypassable_set(mode).difference_update(dropped)
         self.store.async_delay_save()
 
-    async def async_set_bypassable(self, zone_id: int, value: bool) -> None:
-        """Persist the per-zone bypassable flag."""
+    async def async_set_bypassable(
+        self, zone_id: int, value: bool, mode: str = ARM_MODE_AWAY
+    ) -> None:
+        """Persist the per-zone bypassable flag for one arming mode."""
+        if mode not in ARM_MODES:
+            mode = ARM_MODE_AWAY
         zone = (self.coordinator.zones or {}).get(zone_id)
         if value and (
             self.zone_forbids_bypass(zone_id)
@@ -289,10 +311,11 @@ class BypassManager:
                 zone_id,
             )
             return
+        mode_flags = self._mode_bypassable_set(mode)
         if value:
-            self.store.data.bypassable_zones.add(zone_id)
+            mode_flags.add(zone_id)
         else:
-            self.store.data.bypassable_zones.discard(zone_id)
+            mode_flags.discard(zone_id)
         self.store.async_delay_save()
         async_dispatcher_send(
             self.hass, SIGNAL_BYPASS_CONFIG_UPDATED, self.entry.entry_id
@@ -304,8 +327,7 @@ class BypassManager:
     def current_readiness(self, mode: str = ARM_MODE_AWAY) -> ReadinessResult:
         """Readiness for the given mode computed from the latest poll."""
         zones = list((self.coordinator.zones or {}).values())
-        # Only allow bypassable zones if auto-bypass is enabled for this mode
-        bypassable = self.store.data.bypassable_zones if mode in self.auto_bypass_modes else set()
+        bypassable = self.bypassable_zone_ids(mode)
         return evaluate_arm_readiness(zones, bypassable, mode)
 
     def owns_zone(self, zone_id: int) -> bool:
@@ -363,7 +385,7 @@ class BypassManager:
         zones = await self._async_fresh_zones()
         area_zones = [zone for zone in zones if zone_in_area(zone, sub_id)]
         result = evaluate_arm_readiness(
-            area_zones, self.store.data.bypassable_zones, mode
+            area_zones, self.bypassable_zone_ids(mode), mode
         )
 
         if result.blocking_zones:
@@ -607,7 +629,7 @@ class BypassManager:
 
     def _detect_external_disarm(self) -> None:
         """Trigger cleanup when an area was disarmed outside HA."""
-        current = {
+        current: dict[int, Arming | None] = {
             sub_id: sub.arming for sub_id, sub in self.coordinator.sub_systems.items()
         }
         for sub_id, arming in current.items():

@@ -97,12 +97,16 @@ This fork adds full zone-bypass management on top of upstream, driven through th
 - **Services** (usable from scripts/automations, independent of the automatic logic):
   - `hikvision_axpro.bypass_zone` / `hikvision_axpro.unbypass_zone` — target the zone's *Bypass* binary sensor. Every command verifies its outcome against the panel and raises an explicit error on failure.
   - `hikvision_axpro.clear_all_bypasses` — target an alarm panel entity; on an area panel it clears only that area's zones.
-- **Per-zone "Bypassable on arming" switch** (config category, default **off**, stored on the HA side and persistent across restarts). Only created for **Instant** zones — the only zone type the panel itself offers the *forbid bypass on arming* option for. Every other zone type (delay, perimeter, follow, 24h, fire, gas, medical, emergency, key) is never auto-bypassed and gets no switch. For instant zones with the panel-side **"forbid bypass on arming"** setting enabled (`armNoBypassEnabled`, *Vieta esclusione su inserimento*) the switch is forced **off and not editable** (shown unavailable): the panel configuration wins over the HA flag, so a fault on such a zone always blocks arming. The zone configuration is refreshed at startup and then hourly, so a change made in the Hikvision app is picked up within an hour (or immediately on reload).
+- **Per-zone, per-mode bypass switches** (config category, default **off**, stored on the HA side and persistent across restarts):
+  - *Bypassable on away arming*
+  - *Bypassable on home arming*
+  - *Bypassable on vacation arming*
+  These switches are independent: enabling one mode does not enable the others. They are created only for **Instant** zones — the only zone type the panel itself offers the *forbid bypass on arming* option for. Every other zone type (delay, perimeter, follow, 24h, fire, gas, medical, emergency, key) is never auto-bypassed and gets no switch. For instant zones with the panel-side **"forbid bypass on arming"** setting enabled (`armNoBypassEnabled`, *Vieta esclusione su inserimento*) the switches are forced **off and not editable** (shown unavailable): the panel configuration wins over HA flags, so a fault on such a zone always blocks arming. The zone configuration is refreshed at startup and then hourly, so a change made in the Hikvision app is picked up within an hour (or immediately on reload).
 - **Per-panel options**:
   - *Arming modes with automatic bypass of faulted zones* (multi-select: *Home*, *Away*, *Vacation*; default none — aligned with the arm actions visible in Home Assistant).
   - *Re-enable debounce* (default 10 s).
   - *On disarm, remove all bypasses* (default off — normally only integration-applied bypasses are cleaned up).
-- **Ready-to-arm binary sensors** (one per arming mode: home, away, vacation — always created, independent of the auto-bypass configuration, as building blocks for automations): **on** when arming in that mode would succeed — no zone in fault, or every faulted zone is marked bypassable. The home-mode sensor ignores zones the panel itself bypasses on stay arming (`stayAway`). Attributes expose `blocking_zones`, `zones_to_bypass` and a per-area breakdown. They are computed from polled data, so they are advisory: the authoritative check runs synchronously at arm time.
+- **Ready-to-arm binary sensors** (one per arming mode: home, away, vacation — always created, as building blocks for automations): **on** when arming in that mode would succeed according to the same logic used at arm time. They honor both the selected *auto-bypass modes* option and that mode's own bypass switches. The home-mode sensor ignores zones the panel itself bypasses on stay arming (`stayAway`). Attributes expose `blocking_zones`, `zones_to_bypass` and a per-area breakdown. They are computed from polled data, so they are advisory: the authoritative check runs synchronously at arm time.
 - **Vacation arming**: the panels expose `alarm_arm_vacation` in addition to home/away.
 - **Events** on the HA bus for automations/notifications:
   `hikvision_axpro_bypass_applied`, `hikvision_axpro_bypass_removed` (reason:
@@ -116,7 +120,7 @@ before any arm command is sent the integration:
 
 1. Reads **fresh** zone states from the panel (never stale polled data; a read failure aborts arming).
 2. A zone is **in fault** when it is open/triggered, offline or tampered. Low battery is a warning only: it neither blocks arming nor causes a bypass. When arming home, zones the panel stay-bypasses itself are ignored.
-3. Every faulted zone marked *bypassable* is bypassed, with verification.
+3. Every faulted zone marked *bypassable for the current arm mode* is bypassed, with verification.
 4. If any faulted zone is **not** bypassable, or any bypass fails, arming is **aborted**: nothing is sent to the panel, already-applied bypasses are rolled back, and an error listing the blocking zones is raised. There is no permissive mode.
 5. Only then the arm command is sent.
 

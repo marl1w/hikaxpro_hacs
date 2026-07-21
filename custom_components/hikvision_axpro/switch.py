@@ -13,7 +13,7 @@ from homeassistant.components.switch import SwitchDeviceClass, SwitchEntity
 
 from . import HikAxProDataUpdateCoordinator
 from .bypass_manager import is_auto_bypass_eligible
-from .const import DATA_COORDINATOR, DOMAIN
+from .const import ARM_MODES, DATA_COORDINATOR, DOMAIN
 from .hik_device import HikDevice
 from .model import RelaySwitchConf, RelayStatusEnum, OutputStatusFull, Zone
 from homeassistant.const import STATE_ON, STATE_OFF, STATE_UNKNOWN
@@ -42,6 +42,11 @@ async def async_setup_entry(
             )
             devices.append(HikRelaySwitch(coordinator, switch, entry.entry_id))
     entity_registry = er.async_get(hass)
+    allowed_modes = set(
+        coordinator.bypass_manager.auto_bypass_modes
+        if coordinator.bypass_manager is not None
+        else ARM_MODES
+    )
     if coordinator.zone_status is not None:
         for zone in coordinator.zone_status.zone_list:
             # Only instant zones get the config switch (the only type
@@ -50,10 +55,24 @@ async def async_setup_entry(
             # Switches left over from a zone type change are removed
             # from the registry.
             if is_auto_bypass_eligible(zone.zone):
-                devices.append(
-                    HikZoneBypassableSwitch(coordinator, zone.zone, entry.entry_id)
+                devices.extend(
+                    HikZoneBypassableSwitch(
+                        coordinator, zone.zone, entry.entry_id, mode
+                    )
+                    for mode in ARM_MODES
+                    if mode in allowed_modes
                 )
-            elif stale_id := entity_registry.async_get_entity_id(
+            for mode in ARM_MODES:
+                if is_auto_bypass_eligible(zone.zone) and mode in allowed_modes:
+                    continue
+                if stale_id := entity_registry.async_get_entity_id(
+                    "switch",
+                    DOMAIN,
+                    f"{coordinator.mac}-bypassable-{mode}-{zone.zone.id}",
+                ):
+                    entity_registry.async_remove(stale_id)
+            # Legacy mode-less entity id used by older builds.
+            if stale_id := entity_registry.async_get_entity_id(
                 "switch",
                 DOMAIN,
                 f"{coordinator.mac}-bypassable-{zone.zone.id}",
@@ -75,20 +94,25 @@ class HikZoneBypassableSwitch(CoordinatorEntity, HikDevice, SwitchEntity):
     coordinator: HikAxProDataUpdateCoordinator
 
     def __init__(
-        self, coordinator: HikAxProDataUpdateCoordinator, zone: Zone, entry_id: str
+        self,
+        coordinator: HikAxProDataUpdateCoordinator,
+        zone: Zone,
+        entry_id: str,
+        mode: str,
     ) -> None:
         """Create the entity with a DataUpdateCoordinator."""
         super().__init__(coordinator)
         self.zone = zone
         self._ref_id = entry_id
-        self._attr_unique_id = f"{coordinator.mac}-bypassable-{zone.id}"
+        self._mode = mode
+        self._attr_unique_id = f"{coordinator.mac}-bypassable-{mode}-{zone.id}"
         self._attr_icon = "mdi:shield-off-outline"
         self._attr_entity_category = EntityCategory.CONFIG
         self._attr_has_entity_name = True
 
     @property
     def name(self) -> str | None:
-        return "Bypassable on arming"
+        return f"Bypassable on {self._mode} arming"
 
     @property
     def _forbidden_by_panel(self) -> bool:
@@ -112,7 +136,7 @@ class HikZoneBypassableSwitch(CoordinatorEntity, HikDevice, SwitchEntity):
             return None
         if self._forbidden_by_panel:
             return False
-        return manager.is_bypassable(self.zone.id)
+        return manager.is_bypassable(self.zone.id, self._mode)
 
     @property
     def extra_state_attributes(self):
@@ -121,6 +145,7 @@ class HikZoneBypassableSwitch(CoordinatorEntity, HikDevice, SwitchEntity):
         if manager is None:
             return None
         attrs = {}
+        attrs["arming_mode"] = self._mode
         if self._forbidden_by_panel:
             attrs["forbidden_by_panel_config"] = True
         if manager.owns_zone(self.zone.id):
@@ -132,7 +157,7 @@ class HikZoneBypassableSwitch(CoordinatorEntity, HikDevice, SwitchEntity):
         """Mark the zone as bypassable on arming."""
         if self.coordinator.bypass_manager is not None:
             await self.coordinator.bypass_manager.async_set_bypassable(
-                self.zone.id, True
+                self.zone.id, True, self._mode
             )
             self.async_write_ha_state()
 
@@ -140,7 +165,7 @@ class HikZoneBypassableSwitch(CoordinatorEntity, HikDevice, SwitchEntity):
         """Mark the zone as not bypassable on arming."""
         if self.coordinator.bypass_manager is not None:
             await self.coordinator.bypass_manager.async_set_bypassable(
-                self.zone.id, False
+                self.zone.id, False, self._mode
             )
             self.async_write_ha_state()
 
