@@ -1,6 +1,29 @@
 # Changelog
 
 ## Unreleased
+- **feat**: managed zone bypass workflow. Which zones may be auto-bypassed is
+  now chosen on the integration itself (**Configure**): one zone picker per
+  arming mode, shown for the modes that have auto-bypass enabled. Each zone
+  exposes a read-only `binary_sensor` per mode reporting whether it is set as
+  bypassable, replacing the former per-zone switch.
+- **feat**: the arming flow re-reads zone states from the panel, bypasses the
+  selected faulted zones, aborts with the offending zone list otherwise, and
+  rolls back on a partial failure. Bypasses applied by the integration are
+  tracked across restarts, removed once a zone recovers while armed, cleaned
+  up on disarm, and reconciled when removed on the panel side.
+- **fix**: the zone picker only offers zones that can really be bypassed — a zone
+  whose type is not eligible, or whose panel-side "forbid bypass on arming" is on,
+  is left out instead of being offered and then silently ignored.
+- **feat**: the first options page now reads "Next" instead of "Submit" when a
+  zone-picker page follows, and says so in its description.
+- **feat**: `unbypass_zone` and `clear_all_bypasses` services, per-mode
+  `ready_to_arm` sensors, vacation arming, and `bypass_applied` /
+  `bypass_removed` / `arming_blocked` events.
+- **feat**: `arm_away_with_bypass` / `arm_home_with_bypass` now really force
+  the bypass flow for that call, instead of silently doing a plain arm.
+- **chore**: the bypass store keeps only what it must — the bypasses this
+  integration applied. An unreadable or unexpected store file is discarded
+  instead of failing the setup, since the reconciliation rebuilds it.
 - **chore**: rework ID generation. Entity IDs are now
   `<device>_z<zone>_<name>_<compact mac>`
   (`binary_sensor.ingresso_z1_tamper_a4d5c26bb859`), derived from the entity's own
