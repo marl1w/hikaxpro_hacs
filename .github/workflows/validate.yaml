@@ -22,4 +22,5 @@ jobs:
         uses: hacs/action@main
         with:
           category: integration
-          ignore: hacs
+          # This is a fork used for alternative HACS distribution
+          ignore: issues
