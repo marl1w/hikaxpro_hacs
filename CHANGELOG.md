@@ -1,5 +1,8 @@
 # Changelog
 
+## v3.4.1
+- **fix**: bump `hikaxpro` to 2.3.1 — stop unbounded 401 reconnect recursion / null-safe session login / Set-Cookie parsing (#212)
+
 ## v3.4.0
 - **feat**: PIR / motion detector zones expose `binary_sensor` Motion (`device_class: motion`) from zone status `trigger` (#170)
 
