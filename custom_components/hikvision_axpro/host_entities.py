@@ -30,9 +30,27 @@ def build_host_binary_sensors(
 ) -> list[BinarySensorEntity]:
     """Create panel-level binary sensors when host/AC data is present."""
     entities: list[BinarySensorEntity] = []
-    if coordinator.ac_power_status is not None:
+    if (
+        coordinator.ac_power_status is not None
+        or _host_ac_connect(coordinator) is not None
+    ):
         entities.append(HikAcPowerBinary(coordinator, entry_id))
     return entities
+
+
+def _host_ac_connect(coordinator: HikAxProDataUpdateCoordinator) -> bool | None:
+    """Mains presence from /status/host, for panels without acPowerStatus.
+
+    The DS-PWA64-L-WE answers 404 on /status/acPowerStatus but reports
+    ``AlarmHostStatus.HostStatus.ACConnect`` in the host status it already polls.
+    """
+    data = coordinator.host_status
+    if not isinstance(data, dict):
+        return None
+    host = data.get("AlarmHostStatus", data)
+    node = host.get("HostStatus", host) if isinstance(host, dict) else None
+    value = node.get("ACConnect") if isinstance(node, dict) else None
+    return value if isinstance(value, bool) else None
 
 
 def build_host_sensors(
@@ -82,7 +100,7 @@ class HikPanelEntity(CoordinatorEntity):
 
 
 class HikAcPowerBinary(HikPanelEntity, BinarySensorEntity):
-    """AC mains presence from acPowerStatus."""
+    """AC mains presence from acPowerStatus, or ACConnect in the host status."""
 
     def __init__(
         self, coordinator: HikAxProDataUpdateCoordinator, entry_id: str
@@ -100,7 +118,7 @@ class HikAcPowerBinary(HikPanelEntity, BinarySensorEntity):
     def _is_on(self) -> bool | None:
         data = self.coordinator.ac_power_status
         if not data:
-            return None
+            return _host_ac_connect(self.coordinator)
         # Common shapes: {"AcPowerStatus":{"status":"normal"}} or flat status
         node = data.get("AcPowerStatus", data)
         status = node.get("status") if isinstance(node, dict) else None
