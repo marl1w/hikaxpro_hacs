@@ -6,6 +6,7 @@ import pytest
 
 from custom_components.hikvision_axpro.isapi_bypass import (
     AxProBypassClient,
+    BypassArmedError,
     BypassCommandError,
     BypassUnsupportedError,
     BypassVerifyError,
@@ -29,6 +30,64 @@ def test_bypass_success_verified():
 
     client.unbypass(1)
     assert panel.zones[1]["bypassed"] is False
+
+
+def test_unbypass_finds_bypass_recover_path_and_remembers_it():
+    """DS-PWA64-L-WE firmware only answers bypassRecover; found once, reused."""
+    panel = MockAxPro(zones=[zone_payload(1)])
+    panel.recover_path = "bypassRecover"
+    client = make_client(panel)
+    client.bypass(1)
+    client.unbypass(1)
+    assert panel.zones[1]["bypassed"] is False
+    assert panel.recover_requests == ["Recoverbypass", "bypassRecover"]
+
+    client.bypass(1)
+    client.unbypass(1)
+    assert panel.zones[1]["bypassed"] is False
+    assert panel.recover_requests[2:] == ["bypassRecover"]
+
+
+def test_unbypass_without_any_restore_path_is_unsupported():
+    """Neither restore path exists: the firmware lacks the feature."""
+    panel = MockAxPro(zones=[zone_payload(1)])
+    panel.recover_path = "none"
+    client = make_client(panel)
+    client.bypass(1)
+    with pytest.raises(BypassUnsupportedError):
+        client.unbypass(1)
+    assert panel.recover_requests == ["Recoverbypass", "bypassRecover"]
+
+
+def test_known_restore_path_answering_404_is_a_refusal():
+    """Once the path is proven, a 404 from it means "not now", not "missing"."""
+    panel = MockAxPro(zones=[zone_payload(1)])
+    panel.recover_path = "bypassRecover"
+    client = make_client(panel)
+    client.bypass(1)
+    client.unbypass(1)
+
+    client.bypass(1)
+    panel.recover_path = "none"  # the panel now rejects it, e.g. while armed
+    with pytest.raises(BypassCommandError):
+        client.unbypass(1)
+
+
+def test_restore_refused_while_armed_is_a_dedicated_error():
+    """400 armedStatus is the firmware rule, distinct from other refusals."""
+    panel = MockAxPro(zones=[zone_payload(1)])
+    panel.recover_path = "bypassRecover"
+    panel.refuse_restore_while_armed = True
+    client = make_client(panel)
+    client.bypass(1)
+    panel.area()["arming"] = "stay"
+    with pytest.raises(BypassArmedError):
+        client.unbypass(1)
+    # The refusal proved the path: after disarm it is used straight away.
+    panel.area()["arming"] = "disarm"
+    client.unbypass(1)
+    assert panel.zones[1]["bypassed"] is False
+    assert panel.recover_requests == ["Recoverbypass", "bypassRecover", "bypassRecover"]
 
 
 def test_bypass_verify_mismatch_raises():

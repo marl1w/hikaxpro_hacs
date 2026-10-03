@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from asyncio import Lock, timeout
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 import logging
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
@@ -37,7 +37,7 @@ from .const import (
     conf_bypassable_zones,
 )
 from .bypass_store import BypassStore, OwnedBypass
-from .isapi_bypass import AxProBypassClient, BypassError
+from .isapi_bypass import AxProBypassClient, BypassArmedError, BypassError
 from .model import Arming, Status, Zone, ZoneType, ZonesResponse
 
 if TYPE_CHECKING:
@@ -56,6 +56,12 @@ AUTO_BYPASS_ALLOWED_ZONE_TYPES = frozenset({ZoneType.INSTANT})
 RECONCILE_GRACE_SECONDS = 15
 
 FRESH_READ_TIMEOUT = 10
+
+# Back-off for a re-enable the panel refused while armed. Without it the
+# attempt repeats on every poll for as long as the area stays armed. The
+# disarm cleanup is the safety net either way.
+REENABLE_RETRY_BASE_SECONDS = 60
+REENABLE_RETRY_MAX_SECONDS = 900
 
 FAULT_OPEN = "open"
 FAULT_OFFLINE = "offline"
@@ -208,6 +214,11 @@ class BypassManager:
         self.arm_lock = Lock()
         self._healthy_since: dict[int, datetime] = {}
         self._reenable_unsub: dict[int, CALLBACK_TYPE] = {}
+        self._reenable_failures: dict[int, int] = {}
+        self._reenable_retry_at: dict[int, datetime] = {}
+        # Zones whose restore the panel refused with ``armedStatus``: no
+        # further attempt until the disarm cleanup drops their ownership.
+        self._reenable_refused_armed: set[int] = set()
         self._last_arming: dict[int, Arming | None] = {}
         self._reported_ineffective: dict[str, set[int]] = {}
 
@@ -424,6 +435,7 @@ class BypassManager:
                 area=issue["area"] if sub_id is None else sub_id,
                 arm_flow_id=arm_flow_id,
             )
+            self._reset_reenable_backoff(zone_id)
             await self.store.async_save()
             try:
                 await self.hass.async_add_executor_job(self.client.bypass, zone_id)
@@ -496,6 +508,7 @@ class BypassManager:
             self.store.data.owned_bypasses[zone_id] = OwnedBypass(
                 applied_at=dt_util.utcnow(), reason=reason, area=self._zone_area(zone_id)
             )
+            self._reset_reenable_backoff(zone_id)
             await self.store.async_save()
             try:
                 await self.hass.async_add_executor_job(self.client.bypass, zone_id)
@@ -531,6 +544,7 @@ class BypassManager:
             self.store.data.owned_bypasses.pop(zone_id, None)
             self._healthy_since.pop(zone_id, None)
             self._cancel_reenable(zone_id)
+            self._reset_reenable_backoff(zone_id)
             await self.store.async_save()
             self._fire_bypass_event(
                 EVENT_BYPASS_REMOVED, self._issue_for(zone_id), reason
@@ -555,6 +569,7 @@ class BypassManager:
                 self.store.data.owned_bypasses.pop(zone.id, None)
                 self._healthy_since.pop(zone.id, None)
                 self._cancel_reenable(zone.id)
+                self._reset_reenable_backoff(zone.id)
                 self._fire_bypass_event(
                     EVENT_BYPASS_REMOVED, _zone_issue(zone, ""), REASON_SERVICE
                 )
@@ -596,6 +611,7 @@ class BypassManager:
             if zone is None or not zone.bypassed:
                 # Already removed on the panel side: reconcile silently.
                 self.store.data.owned_bypasses.pop(zone_id, None)
+                self._reset_reenable_backoff(zone_id)
                 continue
             try:
                 await self.hass.async_add_executor_job(self.client.unbypass, zone_id)
@@ -613,6 +629,7 @@ class BypassManager:
             )
             self._healthy_since.pop(zone_id, None)
             self._cancel_reenable(zone_id)
+            self._reset_reenable_backoff(zone_id)
 
         if self.clear_all_on_disarm:
             for zone in zones.values():
@@ -678,6 +695,7 @@ class BypassManager:
             self.store.data.owned_bypasses.pop(zone_id, None)
             self._healthy_since.pop(zone_id, None)
             self._cancel_reenable(zone_id)
+            self._reset_reenable_backoff(zone_id)
             self._fire_bypass_event(
                 EVENT_BYPASS_REMOVED, self._issue_for(zone_id), REASON_RECONCILED
             )
@@ -722,6 +740,11 @@ class BypassManager:
                     zone.name,
                     self.debounce_seconds,
                 )
+            if zone_id in self._reenable_refused_armed:
+                continue
+            retry_at = self._reenable_retry_at.get(zone_id)
+            if retry_at is not None and now < retry_at:
+                continue
             since = self._healthy_since[zone_id]
             remaining = self.debounce_seconds - (now - since).total_seconds()
             if remaining <= 0:
@@ -741,6 +764,11 @@ class BypassManager:
     def _cancel_reenable(self, zone_id: int) -> None:
         if unsub := self._reenable_unsub.pop(zone_id, None):
             unsub()
+
+    def _reset_reenable_backoff(self, zone_id: int) -> None:
+        self._reenable_failures.pop(zone_id, None)
+        self._reenable_retry_at.pop(zone_id, None)
+        self._reenable_refused_armed.discard(zone_id)
 
     async def _async_try_reenable(self, zone_id: int) -> None:
         """Remove an owned bypass once the zone proved healthy."""
@@ -791,11 +819,40 @@ class BypassManager:
                 return
             try:
                 await self.hass.async_add_executor_job(self.client.unbypass, zone_id)
-            except BypassError as err:
-                _LOGGER.warning(
-                    "Panel refused to unbypass zone %s while armed; "
-                    "will retry and clean up on disarm: %s",
+            except BypassArmedError as err:
+                # Firmware rule, not a transient refusal: the zone stays
+                # bypassed until the area is disarmed.
+                self._reenable_refused_armed.add(zone_id)
+                _LOGGER.info(
+                    "Zone %s (%s) recovered, but the panel does not restore a "
+                    "bypass while armed; it stays bypassed until disarm: %s",
                     zone_id,
+                    zone.name,
+                    err,
+                )
+                owned.pending_unbypass = True
+                await self.store.async_save()
+                return
+            except BypassError as err:
+                failures = self._reenable_failures.get(zone_id, 0) + 1
+                self._reenable_failures[zone_id] = failures
+                delay = min(
+                    REENABLE_RETRY_BASE_SECONDS * 2 ** (failures - 1),
+                    REENABLE_RETRY_MAX_SECONDS,
+                )
+                self._reenable_retry_at[zone_id] = dt_util.utcnow() + timedelta(
+                    seconds=delay
+                )
+                # Warn once per bypass; the retries are routine after that.
+                log = _LOGGER.warning if failures == 1 else _LOGGER.debug
+                log(
+                    "Could not re-enable zone %s (%s) while armed, attempt %s; "
+                    "retrying in %s s, and the disarm cleanup removes it "
+                    "regardless: %s",
+                    zone_id,
+                    zone.name,
+                    failures,
+                    delay,
                     err,
                 )
                 owned.pending_unbypass = True
@@ -803,6 +860,7 @@ class BypassManager:
                 return
             self.store.data.owned_bypasses.pop(zone_id, None)
             self._healthy_since.pop(zone_id, None)
+            self._reset_reenable_backoff(zone_id)
             await self.store.async_save()
             _LOGGER.info(
                 "Zone %s (%s) re-enabled after recovery: it is armed again",

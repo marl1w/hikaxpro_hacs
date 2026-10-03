@@ -115,6 +115,13 @@ class MockAxPro:
         ]
         self.fail_bypass_zones: set[int] = set()
         self.fail_unbypass_zones: set[int] = set()
+        # The restore path this firmware answers: classic AX Pro takes
+        # "Recoverbypass", the DS-PWA64-L-WE (V1.3.1) only "bypassRecover".
+        self.recover_path = "Recoverbypass"
+        self.recover_requests: list[str] = []
+        # DS-PWA64-L-WE: restoring a bypass on an armed area answers
+        # 400 armedStatus.
+        self.refuse_restore_while_armed = False
         self.refuse_arm = False
         self.zone_status_fail = False
         self.bypass_calls: list[int] = []
@@ -193,9 +200,23 @@ class MockAxPro:
                 return MockResponse(status_code=400, text="bypass refused")
             self.zones[zone_id]["bypassed"] = True
             return MockResponse(json_data={"statusCode": 1})
-        if "control/Recoverbypass/" in endpoint:
-            zone_id = int(endpoint.split("control/Recoverbypass/")[1].split("?")[0])
+        if "control/Recoverbypass/" in endpoint or "control/bypassRecover/" in endpoint:
+            path, rest = endpoint.split("/ISAPI/SecurityCP/control/")[1].split("/", 1)
+            self.recover_requests.append(path)
+            if path != self.recover_path:
+                return MockResponse(
+                    status_code=404,
+                    json_data={"statusCode": 4, "subStatusCode": "notSupport"},
+                )
+            zone_id = int(rest.split("?")[0])
             self.unbypass_calls.append(zone_id)
+            if self.refuse_restore_while_armed and any(
+                sub["arming"] != "disarm" for sub in self.subsystems
+            ):
+                return MockResponse(
+                    status_code=400,
+                    json_data={"statusCode": 4, "subStatusCode": "armedStatus"},
+                )
             if zone_id in self.fail_unbypass_zones:
                 return MockResponse(status_code=400, text="unbypass refused")
             self.zones[zone_id]["bypassed"] = False

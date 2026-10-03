@@ -1,6 +1,19 @@
 # Changelog
 
 ## Unreleased
+- **fix**: restoring a bypassed zone works on firmware that only answers
+  `PUT /ISAPI/SecurityCP/control/bypassRecover/<id>` (DS-PWA64-L-WE V1.3.1,
+  build 251113), which rejects the classic `Recoverbypass` path with
+  404 notSupport while still advertising `isSptBypassRecover`. Both paths are
+  tried and the one the panel accepts is remembered; a later 404 from it is
+  reported as a refusal, not as missing firmware support.
+- **fix**: the same firmware refuses any bypass restore on an armed area with
+  400 `subStatusCode: armedStatus` (verified on the panel). That refusal is now
+  recognised: the zone is left bypassed until disarm after a single attempt,
+  logged at info, instead of retrying on every poll for the whole armed period
+  (6474 warnings in one night). The disarm cleanup restores it.
+- **fix**: any other refused re-enable backs off (1 minute, doubling up to 15)
+  instead of retrying on every poll, and warns only on the first failure.
 - **feat**: managed zone bypass workflow. Which zones may be auto-bypassed is
   now chosen on the integration itself (**Configure**): one zone picker per
   arming mode, shown for the modes that have auto-bypass enabled. Each zone
