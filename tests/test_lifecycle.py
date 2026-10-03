@@ -218,6 +218,58 @@ async def test_refused_unbypass_retried_on_disarm(hass, panel):
     assert not manager.owns_zone(1)
 
 
+async def test_refused_reenable_backs_off_instead_of_retrying_every_poll(
+    hass, panel, freezer
+):
+    """A refused re-enable waits before trying again, then succeeds."""
+    entry = await setup_entry(hass, bypassable={"away": [1]})
+    manager = await arm_away_with_open_door(hass, panel, entry)
+
+    panel.fail_unbypass_zones.add(1)
+    panel.set_zone(1, magnetOpenStatus=False)
+    await poll(hass, entry)
+    await elapse(hass, DEBOUNCE + 2)
+    assert panel.unbypass_calls == [1]
+
+    # Polls inside the 60 s back-off window do not touch the panel, although
+    # the zone has been healthy for longer than the debounce.
+    for _ in range(3):
+        freezer.tick(timedelta(seconds=15))
+        await poll(hass, entry)
+    assert panel.unbypass_calls == [1]
+
+    panel.fail_unbypass_zones.clear()
+    freezer.tick(timedelta(seconds=16))
+    await poll(hass, entry)
+    await hass.async_block_till_done()
+    assert panel.unbypass_calls == [1, 1]
+    assert panel.zones[1]["bypassed"] is False
+    assert not manager.owns_zone(1)
+
+
+async def test_panel_refusing_restore_while_armed_is_tried_once(hass, panel, freezer):
+    """armedStatus: one attempt per armed period, then the disarm restores."""
+    panel.recover_path = "bypassRecover"
+    panel.refuse_restore_while_armed = True
+    entry = await setup_entry(hass, bypassable={"away": [1]})
+    manager = await arm_away_with_open_door(hass, panel, entry)
+
+    panel.set_zone(1, magnetOpenStatus=False)
+    await poll(hass, entry)
+    await elapse(hass, DEBOUNCE + 2)
+    for _ in range(10):  # well past every back-off step
+        freezer.tick(timedelta(minutes=20))
+        await poll(hass, entry)
+    assert panel.unbypass_calls == [1]
+    assert panel.zones[1]["bypassed"] is True
+    assert manager.store.data.owned_bypasses[1].pending_unbypass is True
+
+    await get_coordinator(hass, entry).async_disarm()
+    await hass.async_block_till_done()
+    assert panel.zones[1]["bypassed"] is False
+    assert not manager.owns_zone(1)
+
+
 async def test_reconciliation_of_externally_removed_bypass(hass, panel):
     """An owned bypass removed via keypad is dropped without errors."""
     entry = await setup_entry(hass, bypassable={"away": [1]})

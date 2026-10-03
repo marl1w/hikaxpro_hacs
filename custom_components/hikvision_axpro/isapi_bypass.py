@@ -21,7 +21,16 @@ import hikaxpro
 _LOGGER = logging.getLogger(__name__)
 
 BYPASS_ENDPOINT = "/ISAPI/SecurityCP/control/bypass/"
-RECOVER_BYPASS_ENDPOINT = "/ISAPI/SecurityCP/control/Recoverbypass/"
+# Firmware disagrees on the restore path, although every variant advertises
+# ``HostControlCap.ZoneCap.isSptBypassRecover``. Classic AX Pro firmware
+# takes ``Recoverbypass``; the DS-PWA64-L-WE on V1.3.1 (build 251113) only
+# answers ``bypassRecover`` and rejects every other spelling with
+# 404 notSupport. Tried in this order; the first one the panel accepts is
+# remembered for the life of the client.
+RECOVER_BYPASS_ENDPOINTS = (
+    "/ISAPI/SecurityCP/control/Recoverbypass/",
+    "/ISAPI/SecurityCP/control/bypassRecover/",
+)
 ZONE_STATUS_ENDPOINT = "/ISAPI/SecurityCP/status/zones"
 
 
@@ -35,6 +44,15 @@ class BypassUnsupportedError(BypassError):
 
 class BypassCommandError(BypassError):
     """The panel rejected the bypass command or it kept failing."""
+
+
+class BypassArmedError(BypassCommandError):
+    """The panel refuses the operation because the area is armed.
+
+    The DS-PWA64-L-WE (V1.3.1) answers a bypass restore on an armed area
+    with 400 ``subStatusCode: armedStatus``: a firmware rule, so retrying
+    before the area is disarmed cannot succeed.
+    """
 
 
 class BypassVerifyError(BypassError):
@@ -54,6 +72,7 @@ class AxProBypassClient:
         self._axpro = axpro
         self._max_retries = max_retries
         self._backoff_base = backoff_base
+        self._recover_endpoint: str | None = None
 
     @staticmethod
     def detect_support(zone_status: dict[str, Any] | None) -> bool:
@@ -91,8 +110,37 @@ class AxProBypassClient:
 
     def unbypass(self, zone_id: int) -> None:
         """Restore (unbypass) a zone and verify the panel applied it."""
-        self._control(RECOVER_BYPASS_ENDPOINT, zone_id)
+        self._control_recover(zone_id)
         self._verify(zone_id, expected_bypassed=False)
+
+    def _control_recover(self, zone_id: int) -> None:
+        """Send the restore command on whichever path this firmware has."""
+        if self._recover_endpoint is not None:
+            try:
+                self._control(self._recover_endpoint, zone_id)
+            except BypassUnsupportedError as err:
+                # The path is proven to exist on this panel, so a 403/404
+                # now is a refusal in the current state, not a missing
+                # feature.
+                raise BypassCommandError(str(err)) from err
+            return
+        errors: list[str] = []
+        for endpoint in RECOVER_BYPASS_ENDPOINTS:
+            try:
+                self._control(endpoint, zone_id)
+            except BypassUnsupportedError as err:
+                errors.append(str(err))
+                continue
+            except BypassCommandError:
+                # A refusal still proves the path exists on this panel.
+                self._recover_endpoint = endpoint
+                raise
+            self._recover_endpoint = endpoint
+            _LOGGER.debug("Bypass restore endpoint for this panel: %s", endpoint)
+            return
+        raise BypassUnsupportedError(
+            "No bypass restore endpoint accepted by the panel: " + "; ".join(errors)
+        )
 
     def _control(self, endpoint: str, zone_id: int) -> None:
         response = self._request("PUT", f"{endpoint}{zone_id}")
@@ -137,9 +185,19 @@ class AxProBypassClient:
                 )
                 _LOGGER.debug("Transient HTTP %s on %s %s", response.status_code, method, path)
                 continue
-            raise BypassCommandError(
-                f"{method} {path} returned {response.status_code}: {response.text}"
-            )
+            message = f"{method} {path} returned {response.status_code}: {response.text}"
+            if _sub_status(response) == "armedStatus":
+                raise BypassArmedError(message)
+            raise BypassCommandError(message)
         raise BypassCommandError(
             f"{method} {path} failed after {self._max_retries} attempts: {last_error}"
         )
+
+
+def _sub_status(response) -> str | None:
+    """Return the ISAPI ``subStatusCode`` of an error response, if any."""
+    try:
+        body = response.json()
+    except ValueError:
+        return None
+    return body.get("subStatusCode") if isinstance(body, dict) else None
