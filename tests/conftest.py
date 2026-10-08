@@ -103,6 +103,11 @@ class MockAxPro:
         # Optional per-zone configuration payloads (ZonesConfig endpoint),
         # e.g. {"id": 1, "zoneName": "Front door", "armNoBypassEnabled": True}
         self.zone_configs: list[dict] = []
+        # Relay outputs (Configuration/outputs) and their live state
+        # (exDevStatus OutputList), e.g. {"id": 0, "name": "siren",
+        # "scenarioType": ["alarm"]} and {"id": 0, "status": "off"}.
+        self.output_configs: list[dict] = []
+        self.output_status: list[dict] = []
         self.subsystems = subsystems or [
             {
                 "id": 1,
@@ -238,13 +243,21 @@ class MockAxPro:
                 json_data={"List": [{"Zone": dict(cfg)} for cfg in self.zone_configs]}
             )
         if "Configuration/outputs" in endpoint:
-            return MockResponse(json_data={"List": []})
+            return MockResponse(
+                json_data={"List": [{"Output": dict(o)} for o in self.output_configs]}
+            )
         if "control/outputs/" in endpoint:
             return MockResponse(json_data={"statusCode": 1})
         if "exDevStatus" in endpoint:
             if self.ex_dev_status_fail:
                 return MockResponse(status_code=500, text="exDevStatus failed")
-            return MockResponse(json_data={})
+            return MockResponse(
+                json_data={
+                    "ExDevStatus": {
+                        "OutputList": [{"Output": dict(o)} for o in self.output_status]
+                    }
+                }
+            )
         return MockResponse(status_code=404, text=f"no mock for {endpoint}")
 
 
