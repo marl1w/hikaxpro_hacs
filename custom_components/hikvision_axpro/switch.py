@@ -8,7 +8,7 @@ from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import device_registry as dr, entity_registry as er
 from homeassistant.components.switch import (
     DOMAIN as SWITCH_DOMAIN,
     SwitchEntity,
@@ -18,7 +18,12 @@ from homeassistant.components.switch import (
 from . import HikAxProDataUpdateCoordinator
 from .const import DATA_COORDINATOR, DOMAIN
 from .entity_id import build_entity_id
-from .model import RelaySwitchConf, detector_model_to_name, relay_status_is_on
+from .model import (
+    RelaySwitchConf,
+    detector_model_to_name,
+    relay_allows_manual_control,
+    relay_status_is_on,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -32,9 +37,20 @@ async def async_setup_entry(
     ]
     await coordinator.async_request_refresh()
     device_registry = dr.async_get(hass)
+    entity_registry = er.async_get(hass)
     devices = []
     if coordinator.relays is not None:
         for [switch_id, switch] in coordinator.relays.items():
+            if not relay_allows_manual_control(switch):
+                # The panel drives this relay itself; it is exposed as a
+                # read-only binary sensor. Drop the switch an older release
+                # created for it.
+                stale = entity_registry.async_get_entity_id(
+                    SWITCH_DOMAIN, DOMAIN, f"{coordinator.mac_id}-relay-{switch_id}"
+                )
+                if stale is not None:
+                    entity_registry.async_remove(stale)
+                continue
             _LOGGER.debug("Adding switch with config: %s", switch)
             device_registry.async_get_or_create(
                 config_entry_id=entry.entry_id,

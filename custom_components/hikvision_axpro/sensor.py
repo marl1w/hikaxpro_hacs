@@ -121,7 +121,7 @@ async def async_setup_entry(
                 devices.append(HikSignalInfo(coordinator, zone.zone, entry.entry_id))
             if zone.zone.status is not None:
                 devices.append(HikStatusInfo(coordinator, zone.zone, entry.entry_id))
-    _LOGGER.debug("setting up - sensors: %s", ",".join(x.name for x in devices))
+    _LOGGER.debug("setting up - sensors: %s", ",".join(x.entity_id for x in devices))
     async_add_entities(devices, False)
 
 

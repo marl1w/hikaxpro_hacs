@@ -1504,6 +1504,17 @@ class RelayStatusEnum(Enum):
     ON = "on"
 
 
+def relay_allows_manual_control(relay: RelaySwitchConf) -> bool:
+    """Return True when the panel lets this relay be switched by hand.
+
+    The output's scenarioType lists what drives it. Without "manual" the
+    panel owns the relay (e.g. a siren linked to alarms), so it must not be
+    switchable from Home Assistant. Firmware that does not report
+    scenarioType keeps manual control, as before.
+    """
+    return relay.scenario_type is None or "manual" in relay.scenario_type
+
+
 def relay_status_is_on(status: Optional[object]) -> bool:
     """Return True when an output/relay status means ON.
 

@@ -34,8 +34,11 @@ from .hik_device import HikDevice
 from .model import (
     MOTION_DETECTOR_TYPES,
     DetectorType,
+    RelaySwitchConf,
     Status,
     Zone,
+    relay_allows_manual_control,
+    relay_status_is_on,
     zone_device_model,
 )
 from .host_entities import build_host_binary_sensors
@@ -67,6 +70,9 @@ async def async_setup_entry(
     devices.extend(build_siren_binary_sensors(coordinator, entry.entry_id))
     devices.extend(build_peripheral_binary_sensors(coordinator, entry.entry_id))
     devices.extend(build_host_binary_sensors(coordinator, entry.entry_id))
+    for relay in (coordinator.relays or {}).values():
+        if not relay_allows_manual_control(relay):
+            devices.append(HikRelayBinarySensor(coordinator, relay, entry.entry_id))
 
     if coordinator.zone_status is not None:
         for zone in coordinator.zone_status.zone_list:
@@ -193,7 +199,7 @@ async def async_setup_entry(
     )
     _remove_stale_bypass_entities(hass, coordinator)
 
-    _LOGGER.debug("setting up - sensors: %s", ",".join(x.name for x in devices))
+    _LOGGER.debug("setting up - sensors: %s", ",".join(x.entity_id for x in devices))
     async_add_entities(devices, False)
 
     platform = entity_platform.async_get_current_platform()
@@ -1122,3 +1128,54 @@ class HikBinaryBatteryInfo(CoordinatorEntity, HikDevice, BinarySensorEntity):
             return self.coordinator.zones[self.zone.id].charge == "lowPower"
         else:
             return False
+
+
+class HikRelayBinarySensor(CoordinatorEntity, BinarySensorEntity):
+    """Read-only state of a relay the panel drives itself.
+
+    Used for relays whose panel configuration has no "manual" scenario,
+    e.g. a siren linked to alarms; those relays get no switch.
+    """
+
+    coordinator: HikAxProDataUpdateCoordinator
+
+    def __init__(
+        self,
+        coordinator: HikAxProDataUpdateCoordinator,
+        relay: RelaySwitchConf,
+        entry_id: str,
+    ) -> None:
+        super().__init__(coordinator)
+        self.relay_id = relay.id
+        self._attr_unique_id = f"{coordinator.mac_id}-relay-{relay.id}"
+        self.entity_id = build_entity_id(
+            BINARY_SENSOR_DOMAIN, self._attr_unique_id, coordinator.mac_id, relay.name
+        )
+        self._attr_has_entity_name = True
+        self._attr_name = None
+        self._attr_device_info = DeviceInfo(
+            identifiers={(DOMAIN, f"{entry_id}-relay-{relay.id}")},
+            manufacturer="HikVision",
+            name=relay.name,
+            via_device=(DOMAIN, str(coordinator.mac)),
+        )
+        self._update_from_coordinator()
+
+    @property
+    def available(self) -> bool:
+        return (
+            super().available
+            and self.coordinator.relays_status.get(self.relay_id) is not None
+        )
+
+    def _update_from_coordinator(self) -> None:
+        status = self.coordinator.relays_status.get(self.relay_id)
+        self._attr_is_on = (
+            relay_status_is_on(status.status) if status is not None else None
+        )
+
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        """Handle updated data from the coordinator."""
+        self._update_from_coordinator()
+        self.async_write_ha_state()

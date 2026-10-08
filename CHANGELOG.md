@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+- **feat**: relays follow the panel's output configuration. A relay whose
+  scenarios include `manual` stays a switch; any other relay (e.g. a siren
+  driven by alarm / disarm / clear alarm) is exposed as a read-only
+  `binary_sensor` and can no longer be switched from Home Assistant, and the
+  switch an older release created for it is removed. Firmware that does not
+  report `scenarioType` keeps the switch. Changing the scenarios on the panel
+  takes effect on the next reload of the integration.
+- **fix**: the binary sensor and sensor platforms failed to set up when an
+  entity had no name of its own (a debug log joined entity names).
+
 ## v3.5.0
 - **feat**: the poll is split into two tiers. The configured scan interval now
   covers only the area and zone status (2 requests); peripherals (exDevStatus)
