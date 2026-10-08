@@ -150,6 +150,16 @@ Yes you can lower the `pull interval` via configuration of integration.
 > ⚠️ But you can hit a limit with number of devices and cameras. Your system can become unstable.
 > But I admit some smaller system can run with 2 seconds `pull interval` stable. It also depends on your device. 
 
+The interval applies to the area and zone status only (2 requests per poll).
+Peripherals (relays, sirens, keypads, repeaters) and host diagnostics (AC power,
+batteries) are polled at most once a minute, and right after you switch a relay
+or siren, so a short interval costs far fewer requests than before.
+
+A PIR detector reports a trigger for only ~2 seconds, so with a 10–30 second
+interval most motion is never seen. Use 2–3 seconds if you automate on motion.
+The panel does not push zone events over `alertStream` (tested on DS-PWA64-L-WE),
+so polling is the only source.
+
 Examples:
 - [Real time update and sensor excluding #157](https://github.com/petrleocompel/hikaxpro_hacs/issues/157)
 - [Hikvision IP Cam disconnected by AX Pro #124](https://github.com/petrleocompel/hikaxpro_hacs/issues/124)

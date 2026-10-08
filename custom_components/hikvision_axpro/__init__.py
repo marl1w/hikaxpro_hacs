@@ -98,6 +98,13 @@ _LOGGER = logging.getLogger(__name__)
 # changes rarely; refresh it hourly instead of on every poll.
 ZONE_CONFIG_REFRESH_INTERVAL = timedelta(hours=1)
 
+# Area and zone status are polled on every scan interval: PIR triggers
+# last only ~2s on the panel, so they need a short interval to be seen.
+# Peripherals (relays, sirens, keypads, repeaters) and host diagnostics
+# (AC, batteries) change slowly and cost four requests, so they are only
+# polled on this interval (or the scan interval, when that is longer).
+SLOW_POLL_INTERVAL = timedelta(seconds=60)
+
 
 def _migrated_unique_id(
     unique_id: str, device_name: str | None, mac: str, mac_id: str
@@ -622,6 +629,10 @@ class HikAxProDataUpdateCoordinator(DataUpdateCoordinator):
         self.code = code
         self.use_sub_systems = use_sub_systems
         self._last_zone_config_fetch: datetime | None = None
+        self._last_slow_poll: datetime | None = None
+        self._slow_poll_interval = max(
+            SLOW_POLL_INTERVAL, timedelta(seconds=update_interval)
+        )
         self.sirens = {}
         self.keypads = {}
         self.repeaters = {}
@@ -715,41 +726,52 @@ class HikAxProDataUpdateCoordinator(DataUpdateCoordinator):
         _LOGGER.debug(response.text)
         return OutputConfList.from_dict(response.json())
 
-    def load_ext_devices_status(self):
-        """Load status of external devices."""
-        statuses = self._load_ext_devices_status()
-        if statuses is not None:
-            self.relays_status = {}
-            self.sirens = {}
-            self.keypads = {}
-            self.repeaters = {}
-            self.extensions = {}
-            if statuses.ex_dev_status is not None:
-                if statuses.ex_dev_status.output_list is not None:
-                    for item in statuses.ex_dev_status.output_list:
-                        if item.output is not None and item.output.id is not None:
-                            self.relays_status[item.output.id] = item.output
-                if statuses.ex_dev_status.siren_list is not None:
-                    for item in statuses.ex_dev_status.siren_list:
-                        if item.siren is not None and item.siren.id is not None:
-                            self.sirens[item.siren.id] = item.siren
-                if statuses.ex_dev_status.keypad_list is not None:
-                    for item in statuses.ex_dev_status.keypad_list:
-                        if item.keypad is not None and item.keypad.id is not None:
-                            self.keypads[item.keypad.id] = item.keypad
-                if statuses.ex_dev_status.repeater_list is not None:
-                    for item in statuses.ex_dev_status.repeater_list:
-                        if item.repeater is not None and item.repeater.id is not None:
-                            self.repeaters[item.repeater.id] = item.repeater
-                if statuses.ex_dev_status.extension_list is not None:
-                    for item in statuses.ex_dev_status.extension_list:
-                        if (
-                            item.extension_module is not None
-                            and item.extension_module.id is not None
-                        ):
-                            self.extensions[item.extension_module.id] = (
-                                item.extension_module
-                            )
+    def load_ext_devices_status(self) -> None:
+        """Load status of external devices (exDevStatus)."""
+        devices_status = self._load_ext_devices_status()
+        relays_status: dict[int, OutputStatusFull] = {}
+        sirens: dict[int, Siren] = {}
+        keypads: dict[int, Keypad] = {}
+        repeaters: dict[int, Repeater] = {}
+        extensions: dict[int, ExtensionModule] = {}
+        if devices_status.ex_dev_status is not None:
+            ex = devices_status.ex_dev_status
+            if ex.output_list is not None:
+                for item in ex.output_list:
+                    if item.output is not None and item.output.id is not None:
+                        relays_status[item.output.id] = item.output
+            if ex.siren_list is not None:
+                for item in ex.siren_list:
+                    if item.siren is not None and item.siren.id is not None:
+                        sirens[item.siren.id] = item.siren
+            if ex.keypad_list is not None:
+                for item in ex.keypad_list:
+                    if item.keypad is not None and item.keypad.id is not None:
+                        keypads[item.keypad.id] = item.keypad
+            if ex.repeater_list is not None:
+                for item in ex.repeater_list:
+                    if item.repeater is not None and item.repeater.id is not None:
+                        repeaters[item.repeater.id] = item.repeater
+            if ex.extension_list is not None:
+                for item in ex.extension_list:
+                    if (
+                        item.extension_module is not None
+                        and item.extension_module.id is not None
+                    ):
+                        extensions[item.extension_module.id] = item.extension_module
+        self.relays_status = relays_status
+        self.sirens = sirens
+        self.keypads = keypads
+        self.repeaters = repeaters
+        self.extensions = extensions
+        _LOGGER.debug("Relay status: %s", relays_status)
+        _LOGGER.debug(
+            "Peripherals sirens=%s keypads=%s repeaters=%s extensions=%s",
+            list(sirens),
+            list(keypads),
+            list(repeaters),
+            list(extensions),
+        )
 
     def _load_ext_devices_status(self) -> ExDevStatusResponse:
         endpoint = self.axpro.build_url(
@@ -824,9 +846,18 @@ class HikAxProDataUpdateCoordinator(DataUpdateCoordinator):
                     subsys_arr.append(sublist.sub_sys)
 
             subsys_arr = list(filter(_filter_enabled, subsys_arr))
+            previous_sub_systems = self.sub_systems
             self.sub_systems = {}
             for subsys in subsys_arr:
                 self.sub_systems[subsys.id] = subsys
+                # The panel drives sirens and linked relays together with
+                # the area state; read them now instead of on the slow tier.
+                previous = previous_sub_systems.get(subsys.id)
+                if previous is not None and (previous.arming, previous.alarm) != (
+                    subsys.arming,
+                    subsys.alarm,
+                ):
+                    self.request_slow_refresh()
             status = AlarmControlPanelState(
                 combined_alarm_state(
                     subsys_arr, 1 if self.use_sub_systems else None
@@ -863,51 +894,34 @@ class HikAxProDataUpdateCoordinator(DataUpdateCoordinator):
                     "one: %s",
                     err,
                 )
-        # peripherals from exDevStatus
-        devices_status = self._load_ext_devices_status()
-        relays_status: dict[int, OutputStatusFull] = {}
-        sirens: dict[int, Siren] = {}
-        keypads: dict[int, Keypad] = {}
-        repeaters: dict[int, Repeater] = {}
-        extensions: dict[int, ExtensionModule] = {}
-        if devices_status.ex_dev_status is not None:
-            ex = devices_status.ex_dev_status
-            if ex.output_list is not None:
-                for item in ex.output_list:
-                    if item.output is not None and item.output.id is not None:
-                        relays_status[item.output.id] = item.output
-            if ex.siren_list is not None:
-                for item in ex.siren_list:
-                    if item.siren is not None and item.siren.id is not None:
-                        sirens[item.siren.id] = item.siren
-            if ex.keypad_list is not None:
-                for item in ex.keypad_list:
-                    if item.keypad is not None and item.keypad.id is not None:
-                        keypads[item.keypad.id] = item.keypad
-            if ex.repeater_list is not None:
-                for item in ex.repeater_list:
-                    if item.repeater is not None and item.repeater.id is not None:
-                        repeaters[item.repeater.id] = item.repeater
-            if ex.extension_list is not None:
-                for item in ex.extension_list:
-                    if (
-                        item.extension_module is not None
-                        and item.extension_module.id is not None
-                    ):
-                        extensions[item.extension_module.id] = item.extension_module
-        self.relays_status = relays_status
-        self.sirens = sirens
-        self.keypads = keypads
-        self.repeaters = repeaters
-        self.extensions = extensions
-        _LOGGER.debug("Relay status: %s", relays_status)
-        _LOGGER.debug(
-            "Peripherals sirens=%s keypads=%s repeaters=%s extensions=%s",
-            list(sirens),
-            list(keypads),
-            list(repeaters),
-            list(extensions),
-        )
+        if (
+            self._last_slow_poll is None
+            or dt_util.utcnow() - self._last_slow_poll >= self._slow_poll_interval
+        ):
+            self._update_slow_tier()
+
+    def request_slow_refresh(self) -> None:
+        """Poll peripherals and host diagnostics on the next refresh.
+
+        Called after a command that changes their state (relay, siren,
+        one-key alarm), so the entities do not wait for the slow interval.
+        """
+        self._last_slow_poll = None
+
+    def _update_slow_tier(self) -> None:
+        """Poll peripherals (exDevStatus) and host diagnostics.
+
+        A failure keeps the previous peripheral state and is retried on the
+        next slow interval, so it never holds back the zone and area status.
+        """
+        self._last_slow_poll = dt_util.utcnow()
+        try:
+            self.load_ext_devices_status()
+        except Exception as err:  # noqa: BLE001 - keep polling alive
+            _LOGGER.warning(
+                "Peripheral status refresh failed; keeping the previous one: %s",
+                err,
+            )
         self._update_host_diagnostics()
 
     def _update_host_diagnostics(self) -> None:
@@ -985,8 +999,7 @@ class HikAxProDataUpdateCoordinator(DataUpdateCoordinator):
                 translation_domain=DOMAIN,
                 translation_key="arm_refused",
             )
-        await self._async_update_data()
-        await self.async_request_refresh()
+        await self.async_refresh()
 
     def _arm_vacation(self, sub_id: int | None):
         """Send the vacation arm command (not exposed by hikaxpro)."""
@@ -1034,8 +1047,7 @@ class HikAxProDataUpdateCoordinator(DataUpdateCoordinator):
             )
         if self.bypass_manager is not None:
             await self.bypass_manager.async_on_disarm(sub_id)
-        await self._async_update_data()
-        await self.async_request_refresh()
+        await self.async_refresh()
 
     def _relay_call(self, relay_id: int, is_enabled: bool) -> JSONResponseStatus:
         endpoint = self.axpro.build_url(
@@ -1043,6 +1055,7 @@ class HikAxProDataUpdateCoordinator(DataUpdateCoordinator):
             + hikaxpro.consts.Endpoints.OutputControl.replace("{}", str(relay_id)),
             True,
         )
+        self.request_slow_refresh()
         response = self.axpro.make_request(
             endpoint,
             "PUT",
@@ -1075,6 +1088,7 @@ class HikAxProDataUpdateCoordinator(DataUpdateCoordinator):
             f"http://{self.host}/ISAPI/SecurityCP/control/siren/{siren_id}",
             True,
         )
+        self.request_slow_refresh()
         response = self.axpro.make_request(
             endpoint,
             "PUT",
@@ -1132,6 +1146,7 @@ class HikAxProDataUpdateCoordinator(DataUpdateCoordinator):
             f"http://{self.host}/ISAPI/SecurityCP/control/oneKeyAlarm",
             True,
         )
+        self.request_slow_refresh()
         response = self.axpro.make_request(
             endpoint,
             "PUT",

@@ -124,6 +124,9 @@ class MockAxPro:
         self.refuse_restore_while_armed = False
         self.refuse_arm = False
         self.zone_status_fail = False
+        self.ex_dev_status_fail = False
+        # Every endpoint requested, in order, to assert which tier ran.
+        self.requests: list[str] = []
         self.bypass_calls: list[int] = []
         self.unbypass_calls: list[int] = []
         self.arm_calls: list[tuple[str, int | None]] = []
@@ -151,9 +154,15 @@ class MockAxPro:
         return f"{endpoint}{prefix}format=json" if is_json else endpoint
 
     def subsystem_status(self):
+        self.requests.append("/ISAPI/SecurityCP/status/subSystems")
         return {"SubSysList": [{"SubSys": dict(sub)} for sub in self.subsystems]}
 
+    def host_status(self):
+        self.requests.append("/ISAPI/SecurityCP/status/host")
+        return {}
+
     def zone_status(self):
+        self.requests.append("/ISAPI/SecurityCP/status/zones")
         if self.zone_status_fail:
             raise ConnectionError("zone status unavailable")
         return {"ZoneList": [{"Zone": dict(zone)} for zone in self.zones.values()]}
@@ -180,6 +189,7 @@ class MockAxPro:
         return True
 
     def make_request(self, endpoint, method, data=None, is_json=False):
+        self.requests.append(endpoint)
         if "control/arm/" in endpoint:
             # Used by the integration for arm modes hikaxpro does not
             # expose (vacation).
@@ -229,7 +239,11 @@ class MockAxPro:
             )
         if "Configuration/outputs" in endpoint:
             return MockResponse(json_data={"List": []})
+        if "control/outputs/" in endpoint:
+            return MockResponse(json_data={"statusCode": 1})
         if "exDevStatus" in endpoint:
+            if self.ex_dev_status_fail:
+                return MockResponse(status_code=500, text="exDevStatus failed")
             return MockResponse(json_data={})
         return MockResponse(status_code=404, text=f"no mock for {endpoint}")
 

@@ -1,6 +1,20 @@
 # Changelog
 
-## Unreleased
+## v3.5.0
+- **feat**: the poll is split into two tiers. The configured scan interval now
+  covers only the area and zone status (2 requests); peripherals (exDevStatus)
+  and host diagnostics (host, AC power, batteries; 4 requests) are polled every
+  60 seconds, or every scan interval when that is longer, and right after a
+  relay, siren or one-key alarm command. A short scan interval (2–3 s, needed
+  to catch ~2 s PIR triggers) now costs a third of the requests it did. A
+  failing peripheral poll keeps the previous state and no longer fails the
+  zone and area update.
+- **feat**: an alarm, or an arm/disarm made on the keypad or app, re-reads
+  sirens and relays on the same poll that sees the area change, instead of up
+  to a minute later.
+- **fix**: arming or disarming from Home Assistant fetched the status twice
+  (a direct fetch, then a debounced refresh); it is now a single refresh that
+  updates the entities immediately.
 - **fix**: restoring a bypassed zone works on firmware that only answers
   `PUT /ISAPI/SecurityCP/control/bypassRecover/<id>` (DS-PWA64-L-WE V1.3.1,
   build 251113), which rejects the classic `Recoverbypass` path with
