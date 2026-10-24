@@ -25,6 +25,9 @@ env:
   UPSTREAM_REPO: https://github.com/petrleocompel/hikaxpro_hacs.git
   UPSTREAM_BRANCH: master
   SYNC_BRANCH: sync/upstream
+  # Pin gh to this fork: with an `upstream` remote present, gh otherwise
+  # resolves the parent repo and every label/issue/PR call goes there.
+  GH_REPO: ${{ github.repository }}
 
 jobs:
   sync:
