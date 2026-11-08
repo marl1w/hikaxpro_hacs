@@ -143,6 +143,36 @@ def test_readiness_flag_on_excluded_type_still_blocks():
     assert result.ready is False
 
 
+@pytest.mark.parametrize("mode", [ARM_MODE_AWAY, ARM_MODE_HOME, ARM_MODE_VACATION])
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"magnet_open": True},
+        {"status": "trigger"},
+    ],
+)
+def test_readiness_ignores_open_non_alarm_zone(mode, fields):
+    """A Non-Alarm zone takes no part in arming: open, it neither blocks
+    nor needs a bypass (a garage contact kept only as an open/closed
+    sensor must not stop the house from arming)."""
+    zones = [make_zone(zone_id=1, zone_type="Non-Alarm", **fields)]
+    result = evaluate_arm_readiness(zones, {1}, mode)
+    assert result.ready is True
+    assert result.blocking_zones == []
+    assert result.zones_to_bypass == []
+
+
+def test_readiness_non_alarm_zone_does_not_hide_other_faults():
+    """Only the Non-Alarm zone is skipped; an open Instant zone still blocks."""
+    zones = [
+        make_zone(zone_id=1, zone_type="Non-Alarm", magnet_open=True),
+        make_zone(zone_id=2, magnet_open=True),
+    ]
+    result = evaluate_arm_readiness(zones, set())
+    assert result.ready is False
+    assert [z["zone_id"] for z in result.blocking_zones] == [2]
+
+
 def test_readiness_skips_already_bypassed_zones():
     """Panel-side bypasses are not touched nor counted."""
     zones = [make_zone(zone_id=1, status="trigger", bypassed=True)]

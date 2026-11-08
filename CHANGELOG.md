@@ -10,6 +10,12 @@
   takes effect on the next reload of the integration.
 - **fix**: the binary sensor and sensor platforms failed to set up when an
   entity had no name of its own (a debug log joined entity names).
+- **fix**: an open `Non-Alarm` zone blocked arming from Home Assistant. Such a
+  zone takes no part in arming on the panel, but the readiness check counted
+  it as a fault that could not be auto-bypassed (only `Instant` zones can), so
+  `ready_to_arm_*` went off and every HA arm was refused with
+  `hikvision_axpro_arming_blocked`. Non-Alarm zones are now skipped: they never
+  block and never get bypassed.
 
 ## v3.5.0
 - **feat**: the poll is split into two tiers. The configured scan interval now

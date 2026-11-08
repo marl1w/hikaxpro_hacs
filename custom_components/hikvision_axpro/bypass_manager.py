@@ -176,10 +176,14 @@ def evaluate_arm_readiness(
     ``blocking_zones`` (everything else). Already-bypassed zones are
     skipped and never touched. In home (stay) mode, zones the panel
     itself bypasses on stay arming (``stayAway``) are ignored.
+    Non-Alarm zones take no part in arming at all, so an open one
+    neither blocks nor needs a bypass.
     """
     result = ReadinessResult()
     for zone in zones:
         if zone.bypassed:
+            continue
+        if zone.zone_type == ZoneType.NON_ALARM:
             continue
         if mode == ARM_MODE_HOME and zone.stay_away:
             continue
